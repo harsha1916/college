@@ -1,0 +1,225 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Pi Motor Joystick (Right-Click Hold)</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 16px;
+      user-select: none;            /* prevent selection */
+      -webkit-user-select: none;
+      -ms-user-select: none;
+      touch-action: none;           /* helps on touch screens */
+    }
+    .wrap {
+      max-width: 700px;
+      margin: 0 auto;
+    }
+    .panel {
+      padding: 16px;
+      border: 1px solid #ddd;
+      border-radius: 12px;
+      margin-bottom: 16px;
+    }
+    #joy {
+      width: 320px;
+      height: 320px;
+      border-radius: 50%;
+      background: #f2f2f2;
+      border: 2px solid #ccc;
+      position: relative;
+      overflow: hidden;
+    }
+    #stick {
+      width: 110px;
+      height: 110px;
+      border-radius: 50%;
+      background: #d9d9d9;
+      border: 2px solid #999;
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+    }
+    .row {
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .status {
+      font-size: 14px;
+      background: #111;
+      color: #0f0;
+      padding: 10px 12px;
+      border-radius: 10px;
+      min-width: 260px;
+    }
+    input[type="range"] { width: 320px; }
+    button {
+      padding: 10px 14px;
+      border-radius: 10px;
+      border: 1px solid #ccc;
+      background: #fff;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <h2>Raspberry Pi Motor Control</h2>
+
+  <div class="panel">
+    <p><b>Control:</b> Hold <b>RIGHT mouse button</b> inside joystick and move. Release to stop.</p>
+    <p><b>Speed:</b> slider sets max PWM duty. Joystick push controls how much of that max is applied.</p>
+  </div>
+
+  <div class="panel row">
+    <div id="joy">
+      <div id="stick"></div>
+    </div>
+
+    <div>
+      <div style="margin-bottom:10px;">
+        <label><b>Speed:</b> <span id="spdVal">60</span>%</label><br/>
+        <input id="speed" type="range" min="0" max="100" value="60" />
+      </div>
+
+      <div class="status" id="status">state: stop | duty: 0 | x: 0.00 | y: 0.00</div>
+
+      <div style="margin-top:12px;">
+        <button id="stopBtn">STOP</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+  // ---------- Prevent default context menu (right click menu) ----------
+  window.addEventListener("contextmenu", (e) => e.preventDefault(), { passive:false });
+
+  const joy = document.getElementById("joy");
+  const stick = document.getElementById("stick");
+  const statusEl = document.getElementById("status");
+  const speedEl = document.getElementById("speed");
+  const spdVal = document.getElementById("spdVal");
+  const stopBtn = document.getElementById("stopBtn");
+
+  // Send speed to server
+  async function setSpeed(v){
+    spdVal.textContent = v;
+    await fetch("/api/speed", {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({speed: Number(v)})
+    });
+  }
+
+  speedEl.addEventListener("input", (e)=> setSpeed(e.target.value));
+
+  stopBtn.addEventListener("click", async ()=>{
+    await fetch("/api/stop", {method:"POST"});
+    updateStatus("stop", 0, 0, 0);
+    centerStick();
+  });
+
+  function updateStatus(state, duty, x, y){
+    statusEl.textContent = `state: ${state} | duty: ${duty} | x: ${x.toFixed(2)} | y: ${y.toFixed(2)}`;
+  }
+
+  function centerStick(){
+    stick.style.left = "50%";
+    stick.style.top = "50%";
+  }
+
+  // ---------- Joystick math ----------
+  function clamp(v, a, b){ return Math.max(a, Math.min(b, v)); }
+
+  let rightHeld = false;
+  let lastSend = 0;
+  const SEND_HZ = 20;              // 20 updates/sec
+  const SEND_INTERVAL = 1000 / SEND_HZ;
+
+  async function sendDrive(x, y){
+    const now = performance.now();
+    if (now - lastSend < SEND_INTERVAL) return;
+    lastSend = now;
+
+    const res = await fetch("/api/drive", {
+      method:"POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({x, y})
+    });
+    const data = await res.json();
+    updateStatus(data.state || "?", data.duty || 0, x, y);
+  }
+
+  function handleMove(clientX, clientY){
+    const rect = joy.getBoundingClientRect();
+    const cx = rect.left + rect.width/2;
+    const cy = rect.top + rect.height/2;
+
+    const dx = clientX - cx;
+    const dy = clientY - cy;
+
+    const r = rect.width/2;              // radius
+    const max = r - 55;                  // keep stick inside circle (55 ~ stick radius)
+
+    // normalize to [-1..1]
+    const nx = clamp(dx / max, -1, 1);
+    const ny = clamp(dy / max, -1, 1);
+
+    // position stick (screen coords)
+    stick.style.left = `${50 + nx*50}%`;
+    stick.style.top  = `${50 + ny*50}%`;
+
+    // y on screen is down-positive, we want up-positive => invert
+    const x = nx;
+    const y = -ny;
+
+    sendDrive(x, y);
+  }
+
+  // ---------- Mouse events: RIGHT click hold only ----------
+  joy.addEventListener("mousedown", (e)=>{
+    // e.button: 2 = right
+    if (e.button === 2){
+      rightHeld = true;
+      e.preventDefault();
+      handleMove(e.clientX, e.clientY);
+    }
+  });
+
+  window.addEventListener("mousemove", (e)=>{
+    if (!rightHeld) return;
+    e.preventDefault();
+    handleMove(e.clientX, e.clientY);
+  }, { passive:false });
+
+  window.addEventListener("mouseup", async (e)=>{
+    if (!rightHeld) return;
+    rightHeld = false;
+    await fetch("/api/stop", {method:"POST"});
+    updateStatus("stop", 0, 0, 0);
+    centerStick();
+  });
+
+  // If mouse leaves window, stop for safety
+  window.addEventListener("blur", async ()=>{
+    if (!rightHeld) return;
+    rightHeld = false;
+    await fetch("/api/stop", {method:"POST"});
+    updateStatus("stop", 0, 0, 0);
+    centerStick();
+  });
+
+  // Set initial speed on load
+  setSpeed(speedEl.value);
+  centerStick();
+  updateStatus("stop", 0, 0, 0);
+</script>
+</body>
+</html>
